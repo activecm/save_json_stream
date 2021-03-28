@@ -1,0 +1,64 @@
+
+
+Quickstart:
+
+	Imports Bricata json lines, such as ones exported over a network,
+to standard Zeek json log format.
+
+
+	To listen to incoming json records arriving at a port:
+python3 ./save_json_stream.py -p 4567 -o $HOME/testimport
+
+	For more detail about the import:
+python3 ./save_json_stream.py -p 4567 -o $HOME/testimport --debug
+
+
+	Now send records from Bricata, or simulate this by sending lines
+from a saved log:
+cat samples/raw_export_sample | ncat 127.0.0.1 4567
+	or
+ncat 127.0.0.1 4567 <samples/raw_export_sample
+
+	Note, standard netcat and nc will not do - they don't close the
+connection when the input lines are finished, so use ncat (part of the
+nmap package).
+
+
+	To import directly from a local file, try:
+cat samples/raw_export_sample | python3 ./save_json_stream.py -o $HOME/testimport
+	or
+python3 ./save_json_stream.py -o $HOME/testimport -f samples/raw_export_sample
+
+
+	Underneath the top level directory you request on the command
+line, the records will be saved to
+YY-MM-DD/file_type.HH:00:00-HH+1:00:00.log
+
+	If you also add the "--by_sensor" command line option, that
+directory tree will also include the unique name (UUID) for that sensor,
+like:
+sensor_uuid/YY-MM-DD/file_type.HH:00:00-HH+1:00:00.log
+
+	To have AC-Hunter import these logs automatically, run
+save_json_stream.py on the same system as AC-Hunter.  It will need to run
+as a user with privileges to write to /opt/zeek/remotelogs/ .
+python3 ./save_json_stream.py -o /opt/zeek/remotelogs/  --limit_writes --by_sensor 
+	The --limit_writes option only writes the 6 zeek logs that
+AC-Hunter needs, saving ~10% disk space.
+	The databases that AC-Hunter shows will be named
+sensor_uuid-rolling .
+
+
+	A single copy of this program can 1) listen on a port, 2) accept
+lines on stdin, or 3) read lines from a file.  If you want to do more
+than one of these (or listen to more than one port) you'll need to start
+multiple copies, one for each task, each writing to their own output
+directory.
+
+	A test run with version 3.0 found it will process ~3700
+records/second from a network socket on a laptop.  Since each copy can
+only use a single processor core, the upper bound on how many records can
+be processed in a second is approximately 3700 * number of cores if
+running that many copies (though this will also be limited by the speed
+of the network connection and the available disk bandwidth).
+
