@@ -11,6 +11,7 @@ import os
 import socket
 import sys
 import json
+import ssl
 from datetime import datetime
 
 
@@ -51,7 +52,7 @@ def fail(fail_message):
 	sys.exit(1)
 
 
-def save_line_to_log(input_line, output_directory, should_debug, should_reprint, should_limit_filenames, should_by_sensor):	# pylint: disable=too-many-arguments,too-many-branches,too-many-statements
+def save_line_to_log(input_line, backup_sensor_name, output_directory, should_debug, should_reprint, should_limit_filenames, should_by_sensor):	# pylint: disable=too-many-arguments,too-many-branches,too-many-statements
 	"""Take the single input line and save it to the appropriate log file under the output_directory."""
 	#Input line is a string, not bytes.
 
@@ -81,8 +82,12 @@ def save_line_to_log(input_line, output_directory, should_debug, should_reprint,
 		else:
 			line_next_hour = str(int(line_hour) + 1)
 
+		#Following block - could consider using sensor_ipv4 instead of sensor_uuid to have all "sensorname" directories use ipv4 addresses.
+
 		if should_by_sensor and 'bricata' in parsed_line and 'sensor_uuid' in parsed_line['bricata']:
 			day_dir = os.path.join(output_directory, parsed_line['bricata']['sensor_uuid'], line_YMD)
+		elif should_by_sensor:
+			day_dir = os.path.join(output_directory, backup_sensor_name, line_YMD)
 		else:
 			day_dir = os.path.join(output_directory, line_YMD)
 		if not os.path.isdir(day_dir):
@@ -144,9 +149,12 @@ def save_line_to_log(input_line, output_directory, should_debug, should_reprint,
 
 
 
-def get_connection_handle(listening_port, should_debug):
+def get_connection_handle(listening_port, keyfile, certfile, should_debug):
 	"""Open a TCP listening socket.  The port value is used on first entry, and ignored from then on."""
 
+	client_hint = ''
+
+	#We're making a listening socket on that port _that persists over calls to this function_.
 	if "sock_h" not in get_connection_handle.__dict__:
 		get_connection_handle.sock_h = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
 		try:
@@ -157,15 +165,32 @@ def get_connection_handle(listening_port, should_debug):
 			fail('Unable to listen on port ' + str(listening_port))
 		Debug('Listening on TCP port ' + str(listening_port), should_debug)
 
+	if "tls_context" not in get_connection_handle.__dict__:
+		if keyfile and certfile:
+			get_connection_handle.tls_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+			get_connection_handle.tls_context.load_cert_chain(certfile, keyfile)
+			get_connection_handle.tls_context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
+			get_connection_handle.tls_context.set_ciphers('ALL:!COMPLEMENTOFDEFAULT!MEDIUM:!LOW:!eNULL:!aNULL:!AES256-GCM-SHA384:!AES256-SHA256:!AES256-SHA:!CAMELLIA256-SHA:!AES128-GCM-SHA256:!AES128-SHA256:!AES128-SHA:!CAMELLIA128-SHA')
+		else:
+			get_connection_handle.tls_context = None
+
 	try:
 		Debug('Waiting for an incoming connection.', should_debug)
 		conn_h, client_address = get_connection_handle.sock_h.accept()
 		Debug('Accepted connection from: ' + str(client_address), should_debug)
+		client_hint = client_address[0].replace('::ffff:', '').replace('.', '').replace(':', '').lower()
 	except KeyboardInterrupt:
 		Debug("Exiting.", should_debug)
 		sys.exit(0)
 
-	return conn_h
+	if get_connection_handle.tls_context:
+		try:
+			ssl_conn_h = get_connection_handle.tls_context.wrap_socket(conn_h, server_side=True)
+			return ssl_conn_h, client_hint
+		except ssl.SSLError as e:
+			fail(e)
+	else:
+		return conn_h, client_hint
 
 
 def next_tcp_line(conn_h):
@@ -204,7 +229,7 @@ def next_tcp_line(conn_h):
 known_zeek_filenames = ('conn', 'dce_rpc', 'dns', 'dpd', 'files', 'ftp', 'http', 'kerberos', 'known_certs', 'notice', 'observed_users', 'pe', 'ssh', 'ssl', 'weird', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
 InputFilenames = []
-save_json_stream_version = '0.4.0'
+save_json_stream_version = '0.4.2'
 default_output_directory = './zeeklogs/'
 network_max_read = 128
 
@@ -215,10 +240,21 @@ if __name__ == '__main__':
 	parser.add_argument('-p', '--port', help='TCP port to listen on (overrides stdin and and --files options)', required=False, default=None)
 	parser.add_argument('-o', '--outdir', help='Destination directory name (default is ' + str(default_output_directory) + ')', required=False, default=default_output_directory)
 	parser.add_argument('-d', '--debug', help='Show additional debugging on stderr', required=False, default=False, action='store_true')
+	parser.add_argument('-c', '--certfile', help='SSL certificate file full path', required=False, default=None)
+	parser.add_argument('-k', '--keyfile', help='SSL key file full path', required=False, default=None)
 	parser.add_argument('--reprint', help='Copy all valid json lines to stdout', required=False, default=False, action='store_true')
 	parser.add_argument('--limit_writes', help='Only write out the 6 file types used by Rita and AC-Hunter', required=False, default=False, action='store_true')
 	parser.add_argument('--by_sensor', help='Group logs under a sensor UUID directory (outdir/sensor_uuid/YYYY-MM-DD/)', required=False, default=False, action='store_true')
 	user_args = vars(parser.parse_args())
+
+	#Check for valid argument combinations
+	if user_args['files'] and user_args['port']:
+		fail('Cannot simultaneously read from a file and a TCP port, please pick one or the other.')
+
+	if (user_args['certfile'] and not user_args['keyfile']) or (not user_args['certfile'] and user_args['keyfile']):
+		fail('To make an TLS socket you need both a key and a certificate')
+	elif user_args['certfile'] and user_args['keyfile'] and not user_args['port']:
+		fail('To have a TLS-wrapped socket you first need a listening port.')
 
 	mkdir_p(user_args['outdir'])
 	if not os.path.exists(user_args['outdir']) or not os.access(user_args['outdir'], os.W_OK):
@@ -236,21 +272,22 @@ if __name__ == '__main__':
 	input_lines = 0
 	if user_args['port']:							#If user requested a port, we won't look at files or stdin.
 		while True:
-			connection_h = get_connection_handle(user_args['port'], user_args['debug'])
+			connection_h, ip_hint = get_connection_handle(user_args['port'], user_args['keyfile'], user_args['certfile'], user_args['debug'])	#ip_hint is the ipv4 or ipv6 address without periods or colons
+			sensor_name_fallback = 'stream__' + ip_hint
 			connection_closed = False
 			while not connection_closed:
 				try:
 					one_line, connection_closed = next_tcp_line(connection_h)
 					if one_line:
 						input_lines = input_lines + 1
-						save_line_to_log(to_str(one_line), user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
+						save_line_to_log(to_str(one_line), sensor_name_fallback, user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
 				except KeyboardInterrupt:
 					pass
 	else:									#Process input files, or stdin if none (both handled by the fileinput module)..
 		try:
 			for one_line in fileinput.input(InputFilenames):
 				input_lines = input_lines + 1
-				save_line_to_log(to_str(one_line), user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
+				save_line_to_log(to_str(one_line), sensor_name_fallback, user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
 		except KeyboardInterrupt:
 			pass
 
