@@ -250,10 +250,11 @@ def next_tcp_line(conn_h):
 	return line_to_process, end_of_connection
 
 
-known_zeek_filenames = ('conn', 'dce_rpc', 'dns', 'dpd', 'files', 'ftp', 'http', 'kerberos', 'known_certs', 'notice', 'observed_users', 'pe', 'ssh', 'ssl', 'weird', 'x509')
+#Reference list at https://docs.zeek.org/en/current/script-reference/log-files.html
+known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
 InputFilenames = []
-save_json_stream_version = '0.4.3'
+save_json_stream_version = '0.4.4'
 default_output_directory = './zeeklogs/'
 network_max_read = 128
 
