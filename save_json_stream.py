@@ -70,7 +70,8 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 			print(input_line, end='')
 
 		if not 'timestamp' in parsed_line:
-			fail("Input line is missing timestamp field: " + input_line)
+			Debug("Input line is missing timestamp field: " + input_line, should_debug)
+			return
 
 		line_time = datetime.strptime(parsed_line['timestamp'], "%Y-%m-%dT%H:%M:%S.%f%z")
 		line_YMD = line_time.strftime("%Y-%m-%d")
@@ -108,11 +109,11 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 						with open(os.path.join(day_dir, parsed_line['_path'] + log_tail), "a+") as write_h:	#open for append
 							write_h.write(json.dumps(parsed_line) + '\n')					#Check if linefeed needed
 					except PermissionError:
-						fail("Unable to append to " + str(os.path.join(day_dir, parsed_line['_path'] + log_tail)))
+						Debug("Unable to append to " + str(os.path.join(day_dir, parsed_line['_path'] + log_tail)), True)
 					else:
 						save_line_to_log.successful_writes = save_line_to_log.successful_writes + 1
 			else:
-				fail('Unknown output filename: ' + str(parsed_line['_path']) + ' , please add to known_zeek_filenames if approved.')
+				Debug('Unknown output filename: ' + str(parsed_line['_path']) + ' , please add to known_zeek_filenames if approved.', True)
 
 		elif 'alert' in parsed_line and 'bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'eve':
 			#Suricata Eve alerts
@@ -123,13 +124,13 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 					with open(os.path.join(day_dir, 'eve_alerts' + log_tail), "a+") as write_h:			#open for append
 						write_h.write(input_line)
 				except PermissionError:
-					fail("Unable to append to " + str(os.path.join(day_dir, 'eve_alerts' + log_tail)))
+					Debug("Unable to append to " + str(os.path.join(day_dir, 'eve_alerts' + log_tail)), True)
 
 		elif not('bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'broj' and 'bro_log' in parsed_line and 'event_type' in parsed_line and parsed_line['event_type'] == 'bro_log' and 'file_name' in parsed_line and 'timestamp' in parsed_line):
-			fail("Unknown format for input line, missing one of the required fields: " + input_line)
+			Debug("Unknown format for input line, missing one of the required fields: " + input_line, True)
 
 		elif not parsed_line['file_name'] in known_zeek_filenames:
-			fail('Unknown output filename: ' + str(parsed_line['file_name']) + ' , please add to known_zeek_filenames if approved.')
+			Debug('Unknown output filename: ' + str(parsed_line['file_name']) + ' , please add to known_zeek_filenames if approved.', True)
 
 		else:
 			#Format is good
@@ -143,13 +144,31 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 					with open(os.path.join(day_dir, parsed_line['file_name'] + log_tail), "a+") as write_h:		#open for append
 						write_h.write(json.dumps(parsed_line['bro_log']) + '\n')
 				except PermissionError:
-					fail("Unable to append to " + str(os.path.join(day_dir, parsed_line['file_name'] + log_tail)))
+					Debug("Unable to append to " + str(os.path.join(day_dir, parsed_line['file_name'] + log_tail)), True)
 				else:
 					save_line_to_log.successful_writes = save_line_to_log.successful_writes + 1
 
 
+def valid_client(allowed_list, incoming_ip):
+	"""Checks if the IP is allowed to connect."""
 
-def get_connection_handle(listening_port, keyfile, certfile, should_debug):
+	is_valid = False
+
+	if allowed_list:
+		if incoming_ip in allowed_list:						#Quick check for exact matches
+			is_valid = True
+		else:
+			for one_valid_ip in allowed_list:				#Slower check just in case user specified upper case or ipv4 without '::ffff:'
+				if incoming_ip == one_valid_ip.lower() or '::ffff:' + one_valid_ip == incoming_ip:
+					is_valid = True
+					break
+	else:										#If allowed_list is empty, assume everyone can connect.
+		is_valid = True
+
+	return is_valid
+
+
+def get_connection_handle(listening_port, keyfile, certfile, allowed_ips, should_debug):
 	"""Open a TCP listening socket.  The port value is used on first entry, and ignored from then on."""
 
 	client_hint = ''
@@ -163,7 +182,7 @@ def get_connection_handle(listening_port, keyfile, certfile, should_debug):
 			get_connection_handle.sock_h.listen(1)
 		except PermissionError:
 			fail('Unable to listen on port ' + str(listening_port))
-		Debug('Listening on TCP port ' + str(listening_port), should_debug)
+		Debug('Listening on TCP port ' + str(listening_port), True)
 
 	if "tls_context" not in get_connection_handle.__dict__:
 		if keyfile and certfile:
@@ -177,7 +196,12 @@ def get_connection_handle(listening_port, keyfile, certfile, should_debug):
 	try:
 		Debug('Waiting for an incoming connection.', should_debug)
 		conn_h, client_address = get_connection_handle.sock_h.accept()
-		Debug('Accepted connection from: ' + str(client_address), should_debug)
+		while not valid_client(allowed_ips, client_address[0]):
+			Debug('Denied connection from: ' + str(client_address), True)
+			conn_h.close()
+			conn_h, client_address = get_connection_handle.sock_h.accept()
+
+		Debug('Accepted connection from: ' + str(client_address), True)
 		client_hint = client_address[0].replace('::ffff:', '').replace('.', '').replace(':', '').lower()
 	except KeyboardInterrupt:
 		Debug("Exiting.", should_debug)
@@ -229,7 +253,7 @@ def next_tcp_line(conn_h):
 known_zeek_filenames = ('conn', 'dce_rpc', 'dns', 'dpd', 'files', 'ftp', 'http', 'kerberos', 'known_certs', 'notice', 'observed_users', 'pe', 'ssh', 'ssl', 'weird', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
 InputFilenames = []
-save_json_stream_version = '0.4.2'
+save_json_stream_version = '0.4.3'
 default_output_directory = './zeeklogs/'
 network_max_read = 128
 
@@ -242,6 +266,7 @@ if __name__ == '__main__':
 	parser.add_argument('-d', '--debug', help='Show additional debugging on stderr', required=False, default=False, action='store_true')
 	parser.add_argument('-c', '--certfile', help='SSL certificate file full path', required=False, default=None)
 	parser.add_argument('-k', '--keyfile', help='SSL key file full path', required=False, default=None)
+	parser.add_argument('-s', '--sensorips', help='Sensors that are allowed to connect', required=False, default=[], nargs='*')
 	parser.add_argument('--reprint', help='Copy all valid json lines to stdout', required=False, default=False, action='store_true')
 	parser.add_argument('--limit_writes', help='Only write out the 6 file types used by Rita and AC-Hunter', required=False, default=False, action='store_true')
 	parser.add_argument('--by_sensor', help='Group logs under a sensor UUID directory (outdir/sensor_uuid/YYYY-MM-DD/)', required=False, default=False, action='store_true')
@@ -272,7 +297,7 @@ if __name__ == '__main__':
 	input_lines = 0
 	if user_args['port']:							#If user requested a port, we won't look at files or stdin.
 		while True:
-			connection_h, ip_hint = get_connection_handle(user_args['port'], user_args['keyfile'], user_args['certfile'], user_args['debug'])	#ip_hint is the ipv4 or ipv6 address without periods or colons
+			connection_h, ip_hint = get_connection_handle(user_args['port'], user_args['keyfile'], user_args['certfile'], user_args['sensorips'], user_args['debug'])	#ip_hint is the ipv4 or ipv6 address without periods or colons
 			sensor_name_fallback = 'stream__' + ip_hint
 			connection_closed = False
 			while not connection_closed:
