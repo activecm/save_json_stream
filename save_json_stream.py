@@ -254,9 +254,9 @@ def next_tcp_line(conn_h):
 known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
 InputFilenames = []
-save_json_stream_version = '0.4.4'
+save_json_stream_version = '0.4.5'
 default_output_directory = './zeeklogs/'
-network_max_read = 128
+network_max_read = 1024
 
 
 if __name__ == '__main__':
@@ -313,7 +313,7 @@ if __name__ == '__main__':
 		try:
 			for one_line in fileinput.input(InputFilenames):
 				input_lines = input_lines + 1
-				save_line_to_log(to_str(one_line), sensor_name_fallback, user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
+				save_line_to_log(to_str(one_line), 'fileimport', user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
 		except KeyboardInterrupt:
 			pass
 

@@ -55,10 +55,10 @@ than one of these (or listen to more than one port) you'll need to start
 multiple copies, one for each task, each writing to their own output
 directory.
 
-	A test run with version 3.0 found it will process ~3700
+	A test run with version 0.4.5 found it will process ~4300
 records/second from a network socket on a laptop.  Since each copy can
 only use a single processor core, the upper bound on how many records can
-be processed in a second is approximately 3700 * number of cores if
+be processed in a second is approximately 4300 * number of cores if
 running that many copies (though this will also be limited by the speed
 of the network connection and the available disk bandwidth).
 
