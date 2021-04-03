@@ -13,6 +13,7 @@ import sys
 import json
 import ssl
 from datetime import datetime
+import selectors
 
 
 def to_str(bytes_or_str):
@@ -21,6 +22,7 @@ def to_str(bytes_or_str):
 		return bytes_or_str.decode()
 	else:
 		return bytes_or_str
+
 
 
 def mkdir_p(path):
@@ -36,12 +38,14 @@ def mkdir_p(path):
 				raise
 
 
+
 def Debug(debug_message, should_show_debug):
 	"""Warn user if debugging requested."""
 
 	if should_show_debug:
 		sys.stderr.write(debug_message + '\n')
 		sys.stderr.flush()
+
 
 
 def fail(fail_message):
@@ -52,14 +56,19 @@ def fail(fail_message):
 	sys.exit(1)
 
 
-def save_line_to_log(input_line, backup_sensor_name, output_directory, should_debug, should_reprint, should_limit_filenames, should_by_sensor):	# pylint: disable=too-many-arguments,too-many-branches,too-many-statements
+
+def save_line_to_log(input_line, backup_sensor_name, output_directory, should_debug, should_reprint, should_limit_filenames, should_by_sensor):	# pylint: disable=too-many-arguments,too-many-branches,too-many-statements,too-many-locals
 	"""Take the single input line and save it to the appropriate log file under the output_directory."""
 	#Input line is a string, not bytes.
 
+	if "input_lines" not in save_line_to_log.__dict__:
+		save_line_to_log.input_lines = 0
 	if "successful_writes" not in save_line_to_log.__dict__:
 		save_line_to_log.successful_writes = 0
 	if "alerts" not in save_line_to_log.__dict__:
 		save_line_to_log.alerts = 0
+
+	save_line_to_log.input_lines = save_line_to_log.input_lines + 1
 
 	try:
 		parsed_line = json.loads(input_line)		#Returns a nested python dictionary
@@ -67,13 +76,19 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 		Debug("json parse error in: " + input_line, should_debug)
 	else:
 		if should_reprint:
-			print(input_line, end='')
+			print(input_line)		#Removed "   , end=''  " as the corelight logs don't appear to have linefeeds for some reason
 
-		if not 'timestamp' in parsed_line:
-			Debug("Input line is missing timestamp field: " + input_line, should_debug)
+		if 'timestamp' in parsed_line:
+			linestamp = parsed_line['timestamp']
+			stampformat = "%Y-%m-%dT%H:%M:%S.%f%z"
+		elif 'ts' in parsed_line:
+			linestamp = parsed_line['ts']
+			stampformat = "%Y-%m-%dT%H:%M:%S.%fZ"
+		else:
+			Debug("Input line is missing both ts and timestamp field: " + input_line, should_debug)
 			return
 
-		line_time = datetime.strptime(parsed_line['timestamp'], "%Y-%m-%dT%H:%M:%S.%f%z")
+		line_time = datetime.strptime(linestamp, stampformat)
 		line_YMD = line_time.strftime("%Y-%m-%d")
 		line_hour = line_time.strftime("%H")
 		if line_hour == "23":
@@ -149,6 +164,7 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 					save_line_to_log.successful_writes = save_line_to_log.successful_writes + 1
 
 
+
 def valid_client(allowed_list, incoming_ip):
 	"""Checks if the IP is allowed to connect."""
 
@@ -168,95 +184,105 @@ def valid_client(allowed_list, incoming_ip):
 	return is_valid
 
 
-def get_connection_handle(listening_port, keyfile, certfile, allowed_ips, should_debug):
-	"""Open a TCP listening socket.  The port value is used on first entry, and ignored from then on."""
 
-	client_hint = ''
+def create_server(listening_port, max_connections):
+	"""Create the initial listening server socket."""
 
-	#We're making a listening socket on that port _that persists over calls to this function_.
-	if "sock_h" not in get_connection_handle.__dict__:
-		get_connection_handle.sock_h = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-		try:
-			get_connection_handle.sock_h.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-			get_connection_handle.sock_h.bind(('', int(listening_port)))
-			get_connection_handle.sock_h.listen(1)
-		except PermissionError:
-			fail('Unable to listen on port ' + str(listening_port))
-		Debug('Listening on TCP port ' + str(listening_port), True)
-
-	if "tls_context" not in get_connection_handle.__dict__:
-		if keyfile and certfile:
-			get_connection_handle.tls_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-			get_connection_handle.tls_context.load_cert_chain(certfile, keyfile)
-			get_connection_handle.tls_context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
-			get_connection_handle.tls_context.set_ciphers('ALL:!COMPLEMENTOFDEFAULT!MEDIUM:!LOW:!eNULL:!aNULL:!AES256-GCM-SHA384:!AES256-SHA256:!AES256-SHA:!CAMELLIA256-SHA:!AES128-GCM-SHA256:!AES128-SHA256:!AES128-SHA:!CAMELLIA128-SHA')
-		else:
-			get_connection_handle.tls_context = None
-
+	server_h = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
 	try:
-		Debug('Waiting for an incoming connection.', should_debug)
-		conn_h, client_address = get_connection_handle.sock_h.accept()
-		while not valid_client(allowed_ips, client_address[0]):
-			Debug('Denied connection from: ' + str(client_address), True)
-			conn_h.close()
-			conn_h, client_address = get_connection_handle.sock_h.accept()
+		server_h.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+		server_h.bind(('', int(listening_port)))
+		server_h.listen(max_connections)
+	except PermissionError:
+		fail('Unable to listen on port ' + str(listening_port))
+	Debug('Listening on TCP port ' + str(listening_port), True)
 
+	sel_objs.register(server_h, selectors.EVENT_READ, handle_accept)
+
+
+
+def handle_accept(sock, event_mask):													# pylint: disable=unused-argument
+	"""Callback function called when a new connection is ready to be accept()ed on the server socket."""
+
+	conn_h, client_address = sock.accept()
+	if valid_client(user_args['sensorips'], client_address[0]):
 		Debug('Accepted connection from: ' + str(client_address), True)
-		client_hint = client_address[0].replace('::ffff:', '').replace('.', '').replace(':', '').lower()
-	except KeyboardInterrupt:
-		Debug("Exiting.", should_debug)
-		sys.exit(0)
 
-	if get_connection_handle.tls_context:
-		try:
-			ssl_conn_h = get_connection_handle.tls_context.wrap_socket(conn_h, server_side=True)
-			return ssl_conn_h, client_hint
-		except ssl.SSLError as e:
-			fail(e)
-	else:
-		return conn_h, client_hint
-
-
-def next_tcp_line(conn_h):
-	"""Return the next complete line from the live TCP connection.  Keep reading until we have a complete line."""
-	#We keep reading (up to) 128 byte blocks from the network socket and appending them to data_buffer until we have a linefeed in there.
-	#Once we do, we break out the complete line up to the first linefeed, leaving the remainder in data_buffer for future lines.
-
-	line_to_process = b''
-
-	if "data_buffer" not in next_tcp_line.__dict__:
-		next_tcp_line.data_buffer = b''
-
-	end_of_connection = False
-	while not end_of_connection and (b'\n' not in next_tcp_line.data_buffer):
-		new_data = conn_h.recv(network_max_read)
-		if new_data:
-			next_tcp_line.data_buffer = next_tcp_line.data_buffer + new_data
-			#sys.stderr.write(str(len(new_data)) + "..")
-			#sys.stderr.flush()
+		if user_args['keyfile'] and user_args['certfile']:
+			tls_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+			if user_args['passphrase_file']:
+				cert_passphrase = ''
+				if os.path.exists(user_args['passphrase_file']) and os.access(user_args['passphrase_file'], os.R_OK):
+					with open(user_args['passphrase_file']) as certpass_h:
+						cert_passphrase = certpass_h.read().rstrip('\n')
+				else:
+					Debug('Unable to read ' + user_args['passphrase_file'], True)
+				tls_context.load_cert_chain(user_args['certfile'], user_args['keyfile'], password=cert_passphrase)
+			else:
+				tls_context.load_cert_chain(user_args['certfile'], user_args['keyfile'])
+			tls_context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
+			tls_context.set_ciphers('ALL:!COMPLEMENTOFDEFAULT!MEDIUM:!LOW:!eNULL:!aNULL:!AES256-GCM-SHA384:!AES256-SHA256:!AES256-SHA:!CAMELLIA256-SHA:!AES128-GCM-SHA256:!AES128-SHA256:!AES128-SHA:!CAMELLIA128-SHA')
+			try:
+				ssl_conn_h = tls_context.wrap_socket(conn_h, server_side=True)
+			except ssl.SSLError as e:
+				fail(e)
+			sel_objs.register(ssl_conn_h, selectors.EVENT_READ, handle_read)
 		else:
-			end_of_connection = True
-
-	if b'\n' in next_tcp_line.data_buffer:
-		line_to_process, remainder = next_tcp_line.data_buffer.split(b'\n', 1)
-		next_tcp_line.data_buffer = remainder
-		#sys.stderr.write('\n')
-		#sys.stderr.flush()
-
-	if end_of_connection:
+			sel_objs.register(conn_h, selectors.EVENT_READ, handle_read)
+	else:
+		Debug('Denied connection from: ' + str(client_address), True)
 		conn_h.close()
-		conn_h = None
 
-	return line_to_process, end_of_connection
+
+
+def handle_read(conn_h, event_mask):													# pylint: disable=unused-argument
+	"""Return the next complete line from the live TCP connection.  Keep reading until we have a complete line."""
+	#We keep reading (up to) 1024 byte (network_max_read) blocks from
+	#the network socket and appending them to data_buffer until we
+	#have a linefeed in there.  Once we do, we break out the complete
+	#line up to the first linefeed, leaving the remainder in
+	#data_buffer for future lines.
+
+	if "data_buffers" not in handle_read.__dict__:
+		handle_read.data_buffers = {}
+
+	if conn_h not in handle_read.data_buffers:			#Set up an empty buffer that will hold the most recent incomplete line while we wait for the remainder.  Note we need a separate buffer for each connection, so this is a dictionary indexed by the connection handle.
+		handle_read.data_buffers[conn_h] = b''
+
+	if "client_hints" not in handle_read.__dict__:
+		handle_read.client_hints = {}
+
+	if conn_h not in handle_read.client_hints:
+		handle_read.client_hints[conn_h] = 'stream__' + conn_h.getpeername()[0].replace('::ffff:', '').replace('.', '').replace(':', '').lower()		#sensor_name_fallback
+
+	new_data = conn_h.recv(network_max_read)
+	if new_data:
+		handle_read.data_buffers[conn_h] = handle_read.data_buffers[conn_h] + new_data
+		#sys.stderr.write(str(len(new_data)) + "..")
+		#sys.stderr.flush()
+		while b'\n' in handle_read.data_buffers[conn_h]:
+			line_to_process, remainder = handle_read.data_buffers[conn_h].split(b'\n', 1)
+			handle_read.data_buffers[conn_h] = remainder
+			save_line_to_log(to_str(line_to_process), handle_read.client_hints[conn_h], user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
+	else:
+		if handle_read.data_buffers[conn_h]:			#If we have data left over in the buffer, write it before closing.
+			save_line_to_log(to_str(handle_read.data_buffers[conn_h]), handle_read.client_hints[conn_h], user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])		#Write out last incomplete line
+		del handle_read.data_buffers[conn_h]
+		del handle_read.client_hints[conn_h]
+		sel_objs.unregister(conn_h)
+		conn_h.close()
+		Debug('Connection closed.', True)
+
 
 
 #Reference list at https://docs.zeek.org/en/current/script-reference/log-files.html
 known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
 InputFilenames = []
-save_json_stream_version = '0.4.5'
+save_json_stream_version = '0.5.0'
 default_output_directory = './zeeklogs/'
 network_max_read = 1024
+default_max_connections = 128
 
 
 if __name__ == '__main__':
@@ -267,6 +293,7 @@ if __name__ == '__main__':
 	parser.add_argument('-d', '--debug', help='Show additional debugging on stderr', required=False, default=False, action='store_true')
 	parser.add_argument('-c', '--certfile', help='SSL certificate file full path', required=False, default=None)
 	parser.add_argument('-k', '--keyfile', help='SSL key file full path', required=False, default=None)
+	parser.add_argument('--passphrase_file', help='Full path to file containing passphrase', required=False, default=None)
 	parser.add_argument('-s', '--sensorips', help='Sensors that are allowed to connect', required=False, default=[], nargs='*')
 	parser.add_argument('--reprint', help='Copy all valid json lines to stdout', required=False, default=False, action='store_true')
 	parser.add_argument('--limit_writes', help='Only write out the 6 file types used by Rita and AC-Hunter', required=False, default=False, action='store_true')
@@ -282,11 +309,11 @@ if __name__ == '__main__':
 	elif user_args['certfile'] and user_args['keyfile'] and not user_args['port']:
 		fail('To have a TLS-wrapped socket you first need a listening port.')
 
+	max_listeners = default_max_connections
+
 	mkdir_p(user_args['outdir'])
 	if not os.path.exists(user_args['outdir']) or not os.access(user_args['outdir'], os.W_OK):
-		sys.stderr.write('Unable to create or write to output directory ' + user_args['outdir'] + ' , exiting.\n')
-		sys.stderr.flush()
-		sys.exit()
+		fail('Unable to create or write to output directory ' + user_args['outdir'])
 
 	for one_file in user_args['files']:
 		if os.path.exists(one_file) and os.access(one_file, os.R_OK):
@@ -295,30 +322,33 @@ if __name__ == '__main__':
 			sys.stderr.write('Unable to locate or read ' + one_file + ' , skipping this file.\n')
 			sys.stderr.flush()
 
-	input_lines = 0
 	if user_args['port']:							#If user requested a port, we won't look at files or stdin.
-		while True:
-			connection_h, ip_hint = get_connection_handle(user_args['port'], user_args['keyfile'], user_args['certfile'], user_args['sensorips'], user_args['debug'])	#ip_hint is the ipv4 or ipv6 address without periods or colons
-			sensor_name_fallback = 'stream__' + ip_hint
-			connection_closed = False
-			while not connection_closed:
-				try:
-					one_line, connection_closed = next_tcp_line(connection_h)
-					if one_line:
-						input_lines = input_lines + 1
-						save_line_to_log(to_str(one_line), sensor_name_fallback, user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
-				except KeyboardInterrupt:
-					pass
+		sel_objs = selectors.DefaultSelector()				#The main listening socket and all connections are in here - we select() for new connections and new lines.
+
+		create_server(user_args['port'], max_listeners)
+
+		continue_listening = True
+		while continue_listening:							#No current way to shut it down
+			try:
+				for key, mask in sel_objs.select(timeout=1):		#Wait for either new connection or data on existing handle...
+					callback = key.data
+					callback(key.fileobj, mask)			#...and hand it off the the appropriate handler.
+			except KeyboardInterrupt:
+				Debug('Shutting down.', user_args['debug'])
+				continue_listening = False
+
+		sel_objs.close()
+
 	else:									#Process input files, or stdin if none (both handled by the fileinput module)..
 		try:
 			for one_line in fileinput.input(InputFilenames):
-				input_lines = input_lines + 1
 				save_line_to_log(to_str(one_line), 'fileimport', user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
 		except KeyboardInterrupt:
 			pass
 
 	if user_args['debug']:
-		Debug(str(input_lines) + " lines read", user_args['debug'])
+		if "input_lines" in save_line_to_log.__dict__:
+			Debug(str(save_line_to_log.input_lines) + " lines read", user_args['debug'])
 		if "successful_writes" in save_line_to_log.__dict__:
 			Debug(str(save_line_to_log.successful_writes) + " lines successfully written", user_args['debug'])
 		if "alerts" in save_line_to_log.__dict__:
