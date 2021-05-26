@@ -70,9 +70,11 @@ openssl req -x509 -newkey rsa:2048 -keyout testkey.pem -out testcert.pem -days 3
 	When you run the server, include the key and certificate
 filenames on the command line:
 python3 ./save_json_stream.py -p 9999 -c testcert.pem -k testkey.pem -o $HOME/testimport
-	We also suggest you use the --passphrase_file parameter to
-indicate a file holding the passphrase, otherwise you'll be providing it
-by hand at each TLS connection.
+	If the certificate is protected by a passphrase, please use either
+--passphrase_file file_name
+	, which reads the passphrase from the first line of file_name, or
+--passphrase_ask
+	, which asks the user for the passphrase at startup.
 
 	The corresponding test tool for sending lines is:
 cat samples/raw_export_sample | openssl s_client -quiet -servername localhost -connect localhost:9999
