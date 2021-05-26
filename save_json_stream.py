@@ -5,15 +5,16 @@
 #Released under the GPL
 
 import errno
-import fileinput	#Allows one to read from files specified on the command line or read directly from stdin automatically
-import argparse
+import fileinput		#Allows one to read from files specified on the command line or read directly from stdin automatically
+import argparse			#Processes command line arguments
 import os
-import socket
+import socket			#Handles low-level network connections
 import sys
-import json
-import ssl
-from datetime import datetime
-import selectors
+import json			#parses json records received from the sensor
+import ssl			#Allows a socket to be a TLS server if user chooses
+from datetime import datetime	#Date field processing
+import selectors		#Allows us to listen on multiple incoming network streams and process the next available without explicit polling
+import getpass			#Lets us ask for a passphrase without echoing it to the screen
 
 
 def to_str(bytes_or_str):
@@ -84,8 +85,11 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 		elif 'ts' in parsed_line:
 			linestamp = parsed_line['ts']
 			stampformat = "%Y-%m-%dT%H:%M:%S.%fZ"
+		elif '_write_ts' in parsed_line:
+			linestamp = parsed_line['_write_ts']
+			stampformat = "%Y-%m-%dT%H:%M:%S.%fZ"
 		else:
-			Debug("Input line is missing both ts and timestamp field: " + input_line, should_debug)
+			Debug("Input line is missing ts, timestamp, and _write_ts fields: " + input_line, should_debug)
 			return
 
 		line_time = datetime.strptime(linestamp, stampformat)
@@ -111,8 +115,8 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 
 		log_tail = '.' + line_hour + ':00:00-' + line_next_hour + ':00:00.log'
 
+		#======== Corelight json streaming logs ========
 		if '_path' in parsed_line and '_write_ts' in parsed_line:
-			#Corelight json streaming logs
 			if parsed_line['_path'] in known_zeek_filenames:
 				if (not should_limit_filenames) or parsed_line['_path'] in limit_writes_to:
 					#First, make any needed additions to the main dictionary
@@ -130,25 +134,27 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 			else:
 				Debug('Unknown output filename: ' + str(parsed_line['_path']) + ' , please add to known_zeek_filenames if approved.', True)
 
-		elif 'alert' in parsed_line and 'bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'eve':
-			#Suricata Eve alerts
+		#======== Alert record ========
+		elif ('alert' in parsed_line and 'bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'eve') or ('event_type' in parsed_line and parsed_line['event_type'] == 'alert'):	# pylint: disable=too-many-boolean-expressions
 			save_line_to_log.alerts = save_line_to_log.alerts + 1
 			if not should_limit_filenames:
-				#write line out to "eve_alerts"
+				#write line out to "alerts"
 				try:
-					with open(os.path.join(day_dir, 'eve_alerts' + log_tail), "a+") as write_h:			#open for append
+					with open(os.path.join(day_dir, 'alerts' + log_tail), "a+") as write_h:			#open for append
 						write_h.write(input_line)
 				except PermissionError:
-					Debug("Unable to append to " + str(os.path.join(day_dir, 'eve_alerts' + log_tail)), True)
+					Debug("Unable to append to " + str(os.path.join(day_dir, 'alerts' + log_tail)), True)
 
+		#======== Unknown format ========
 		elif not('bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'broj' and 'bro_log' in parsed_line and 'event_type' in parsed_line and parsed_line['event_type'] == 'bro_log' and 'file_name' in parsed_line and 'timestamp' in parsed_line):
 			Debug("Unknown format for input line, missing one of the required fields: " + input_line, True)
 
+		#======== Unknown output file name ========
 		elif not parsed_line['file_name'] in known_zeek_filenames:
 			Debug('Unknown output filename: ' + str(parsed_line['file_name']) + ' , please add to known_zeek_filenames if approved.', True)
 
+		#======== Bricata json streaming logs ========
 		else:
-			#Format is good
 			if (not should_limit_filenames) or parsed_line['file_name'] in limit_writes_to:
 				#First, make any needed additions to the "bro_log" section
 				if 'ts' not in parsed_line['bro_log']:
@@ -166,7 +172,7 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 
 
 def valid_client(allowed_list, incoming_ip):
-	"""Checks if the IP is allowed to connect."""
+	"""Checks if the IP is allowed to connect.  If no list of valid IPs was given on the command line, all IPs can connect."""
 
 	is_valid = False
 
@@ -188,7 +194,11 @@ def valid_client(allowed_list, incoming_ip):
 def create_server(listening_port, max_connections):
 	"""Create the initial listening server socket."""
 
-	server_h = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+	try:
+		server_h = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)		#We try to open an IPv6 listener (which also accepts IPv4).  If this fails (Gentoo allows a system with no ipv6)...
+	except OSError:
+		server_h = socket.socket(socket.AF_INET, socket.SOCK_STREAM)		#...we retry with IPv4 only.
+
 	try:
 		server_h.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 		server_h.bind(('', int(listening_port)))
@@ -210,14 +220,11 @@ def handle_accept(sock, event_mask):													# pylint: disable=unused-argume
 
 		if user_args['keyfile'] and user_args['certfile']:
 			tls_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-			if user_args['passphrase_file']:
-				cert_passphrase = ''
-				if os.path.exists(user_args['passphrase_file']) and os.access(user_args['passphrase_file'], os.R_OK):
-					with open(user_args['passphrase_file']) as certpass_h:
-						cert_passphrase = certpass_h.read().rstrip('\n')
-				else:
-					Debug('Unable to read ' + user_args['passphrase_file'], True)
-				tls_context.load_cert_chain(user_args['certfile'], user_args['keyfile'], password=cert_passphrase)
+			if cert_passphrase is not None:
+				try:
+					tls_context.load_cert_chain(user_args['certfile'], user_args['keyfile'], password=cert_passphrase)
+				except ssl.SSLError:
+					fail("Unable to load certificate and key - invalid passphrase?")
 			else:
 				tls_context.load_cert_chain(user_args['certfile'], user_args['keyfile'])
 			tls_context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
@@ -236,9 +243,9 @@ def handle_accept(sock, event_mask):													# pylint: disable=unused-argume
 
 
 def handle_read(conn_h, event_mask):													# pylint: disable=unused-argument
-	"""Return the next complete line from the live TCP connection.  Keep reading until we have a complete line."""
-	#We keep reading (up to) 1024 byte (network_max_read) blocks from
-	#the network socket and appending them to data_buffer until we
+	"""Save the next complete line from the live TCP connection."""
+	#We read (up to) 1024 byte (network_max_read) blocks from
+	#the network socket and append them to data_buffer until we
 	#have a linefeed in there.  Once we do, we break out the complete
 	#line up to the first linefeed, leaving the remainder in
 	#data_buffer for future lines.
@@ -276,13 +283,13 @@ def handle_read(conn_h, event_mask):													# pylint: disable=unused-argume
 
 
 #Reference list at https://docs.zeek.org/en/current/script-reference/log-files.html
-known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
+known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'corelight_overall_capture_loss', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'suricata_corelight', 'suricata_stats', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
-InputFilenames = []
-save_json_stream_version = '0.5.0'
+input_filenames = []
+save_json_stream_version = '0.5.3'
 default_output_directory = './zeeklogs/'
 network_max_read = 1024
-default_max_connections = 128
+default_max_connections = 778						#Each corelight sensor appears to take a maximum of 12 connections, each Bricata takes 1.  Bash appears to have a max of 1024 without additional ulimit tweaking.
 
 
 if __name__ == '__main__':
@@ -294,6 +301,7 @@ if __name__ == '__main__':
 	parser.add_argument('-c', '--certfile', help='SSL certificate file full path', required=False, default=None)
 	parser.add_argument('-k', '--keyfile', help='SSL key file full path', required=False, default=None)
 	parser.add_argument('--passphrase_file', help='Full path to file containing passphrase', required=False, default=None)
+	parser.add_argument('--passphrase_ask', help='Interactively ask for the passphrase at startup', required=False, default=False, action='store_true')
 	parser.add_argument('-s', '--sensorips', help='Sensors that are allowed to connect', required=False, default=[], nargs='*')
 	parser.add_argument('--reprint', help='Copy all valid json lines to stdout', required=False, default=False, action='store_true')
 	parser.add_argument('--limit_writes', help='Only write out the 6 file types used by Rita and AC-Hunter', required=False, default=False, action='store_true')
@@ -311,13 +319,22 @@ if __name__ == '__main__':
 
 	max_listeners = default_max_connections
 
+	cert_passphrase = None
+	if user_args['passphrase_file'] and os.path.exists(user_args['passphrase_file']) and os.access(user_args['passphrase_file'], os.R_OK):
+		with open(user_args['passphrase_file']) as certpass_h:
+			cert_passphrase = certpass_h.read().rstrip('\n')
+	elif user_args['passphrase_ask']:
+		cert_passphrase = getpass.getpass(prompt="Please enter the TLS key passhrase (will not show up on the screen): ").rstrip('\n')		#Asks for the password without echoing it to the screen
+	elif user_args['passphrase_file']:
+		Debug('Unable to read ' + user_args['passphrase_file'], True)
+
 	mkdir_p(user_args['outdir'])
 	if not os.path.exists(user_args['outdir']) or not os.access(user_args['outdir'], os.W_OK):
 		fail('Unable to create or write to output directory ' + user_args['outdir'])
 
 	for one_file in user_args['files']:
 		if os.path.exists(one_file) and os.access(one_file, os.R_OK):
-			InputFilenames.append(one_file)
+			input_filenames.append(one_file)
 		else:
 			sys.stderr.write('Unable to locate or read ' + one_file + ' , skipping this file.\n')
 			sys.stderr.flush()
@@ -341,7 +358,7 @@ if __name__ == '__main__':
 
 	else:									#Process input files, or stdin if none (both handled by the fileinput module)..
 		try:
-			for one_line in fileinput.input(InputFilenames):
+			for one_line in fileinput.input(input_filenames):
 				save_line_to_log(to_str(one_line), 'fileimport', user_args['outdir'], user_args['debug'], user_args['reprint'], user_args['limit_writes'], user_args['by_sensor'])
 		except KeyboardInterrupt:
 			pass
