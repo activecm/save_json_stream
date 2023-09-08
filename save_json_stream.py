@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
-"""Reads lines from command-line-supplied filenames (or stdin if none) and saves them out to the appropriate zeek log file."""
-#Tested under python3.  (Note, python 2 will not successfully parse the date string because of the time zone field at the end.)
-#Copyright 2021, William Stearns <bill@activecountermeasures.com>
-#Released under the GPL
+"""Reads lines from command-line-supplied filenames, an (unencrypted or TLS) network socket, or else stdin and saves them out to the appropriate zeek log file."""
+
+#Tested under python3.  One user reported date parsing issues in python 3.6 that went away in python 3.9 .
+#(Note, python 2 will not successfully parse the date string because of the time zone field at the end.)
+#Copyright 2021-2022, William Stearns <bill@activecountermeasures.com>
+#Released under the GPL Version 3
+
+__version__ = '0.5.8'
+
+__author__ = 'William Stearns'
+__copyright__ = 'Copyright 2021-2022, William Stearns'
+__credits__ = ['Alex Kirk', 'Jamey DeLuzio', 'Kent Wilson', 'Marc Jensen', 'William Stearns']
+__email__ = 'bill@activecountermeasures.com'
+__license__ = 'GPL 3.0'
+__maintainer__ = 'William Stearns'
+__status__ = 'Production'				#Prototype, Development or Production
+
 
 import errno
 import fileinput		#Allows one to read from files specified on the command line or read directly from stdin automatically
@@ -125,7 +138,7 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 
 					#write line out to target file
 					try:
-						with open(os.path.join(day_dir, parsed_line['_path'] + log_tail), "a+") as write_h:	#open for append
+						with open(os.path.join(day_dir, parsed_line['_path'] + log_tail), "a+", encoding="utf8") as write_h:	#open for append
 							write_h.write(json.dumps(parsed_line) + '\n')					#Check if linefeed needed
 					except PermissionError:
 						Debug("Unable to append to " + str(os.path.join(day_dir, parsed_line['_path'] + log_tail)), True)
@@ -136,21 +149,22 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 
 		#======== Alert record ========
 		elif ('alert' in parsed_line and 'bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'eve') or ('event_type' in parsed_line and parsed_line['event_type'] == 'alert'):	# pylint: disable=too-many-boolean-expressions
-			save_line_to_log.alerts = save_line_to_log.alerts + 1
 			if not should_limit_filenames:
 				#write line out to "alerts"
 				try:
-					with open(os.path.join(day_dir, 'alerts' + log_tail), "a+") as write_h:			#open for append
+					with open(os.path.join(day_dir, 'alerts' + log_tail), "a+", encoding="utf8") as write_h:			#open for append
 						write_h.write(input_line)
 				except PermissionError:
 					Debug("Unable to append to " + str(os.path.join(day_dir, 'alerts' + log_tail)), True)
+				else:
+					save_line_to_log.alerts = save_line_to_log.alerts + 1
 
 		#======== Unknown format ========
 		elif not('bricata' in parsed_line and 'event_format' in parsed_line['bricata'] and parsed_line['bricata']['event_format'] == 'broj' and 'bro_log' in parsed_line and 'event_type' in parsed_line and parsed_line['event_type'] == 'bro_log' and 'file_name' in parsed_line and 'timestamp' in parsed_line):
 			Debug("Unknown format for input line, missing one of the required fields: " + input_line, True)
 
 		#======== Unknown output file name ========
-		elif not parsed_line['file_name'] in known_zeek_filenames:
+		elif parsed_line['file_name'] not in known_zeek_filenames:
 			Debug('Unknown output filename: ' + str(parsed_line['file_name']) + ' , please add to known_zeek_filenames if approved.', True)
 
 		#======== Bricata json streaming logs ========
@@ -162,7 +176,7 @@ def save_line_to_log(input_line, backup_sensor_name, output_directory, should_de
 
 				#write "bro_log" section out to target file
 				try:
-					with open(os.path.join(day_dir, parsed_line['file_name'] + log_tail), "a+") as write_h:		#open for append
+					with open(os.path.join(day_dir, parsed_line['file_name'] + log_tail), "a+", encoding="utf8") as write_h:		#open for append
 						write_h.write(json.dumps(parsed_line['bro_log']) + '\n')
 				except PermissionError:
 					Debug("Unable to append to " + str(os.path.join(day_dir, parsed_line['file_name'] + log_tail)), True)
@@ -244,11 +258,12 @@ def handle_accept(sock, event_mask):													# pylint: disable=unused-argume
 
 def handle_read(conn_h, event_mask):													# pylint: disable=unused-argument
 	"""Save the next complete line from the live TCP connection."""
-	#We read (up to) 1024 byte (network_max_read) blocks from
-	#the network socket and append them to data_buffer until we
-	#have a linefeed in there.  Once we do, we break out the complete
-	#line up to the first linefeed, leaving the remainder in
-	#data_buffer for future lines.
+	#We read (up to) 1024 byte (network_max_read) blocks from the
+	#network socket and append them to data_buffer until we have a
+	#linefeed in there.  Once we do, we break out the complete line
+	#up to the first linefeed (repeating as often as we have more
+	#linefeeds), leaving the remainder in data_buffer for future
+	#lines.
 
 	if "data_buffers" not in handle_read.__dict__:
 		handle_read.data_buffers = {}
@@ -283,17 +298,16 @@ def handle_read(conn_h, event_mask):													# pylint: disable=unused-argume
 
 
 #Reference list at https://docs.zeek.org/en/current/script-reference/log-files.html
-known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'corelight_overall_capture_loss', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'suricata_corelight', 'suricata_stats', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
+known_zeek_filenames = ('barnyard2', 'broker', 'capture_loss', 'cluster', 'config', 'conn', 'corelight_overall_capture_loss', 'dce_rpc', 'dhcp', 'dnp3', 'dns', 'dns_hunt', 'dpd', 'files', 'ftp', 'http', 'intel', 'irc', 'kerberos', 'known_certs', 'known_hosts', 'known_modbus', 'known_services', 'loaded_scripts', 'modbus', 'modbus_register_change', 'mysql', 'netcontrol', 'netcontrol_drop', 'netcontrol_shunt', 'netcontrol_catch_release', 'notice', 'notice_alarm', 'ntlm', 'ntp', 'observed_users', 'ocsp', 'openflow', 'packet_filter', 'pe', 'print', 'prof', 'radius', 'rdp', 'reporter', 'rfb', 'signatures', 'sip', 'smb_cmd', 'smb_files', 'smb_mapping', 'smtp', 'snmp', 'socks', 'software', 'ssh', 'ssl', 'stats', 'stderr', 'stdout', 'suricata_corelight', 'suricata_stats', 'syslog', 'traceroute', 'tunnel', 'unified2', 'unknown_protocols', 'weird', 'weird_stats', 'x509')
 limit_writes_to = ('conn', 'dns', 'http', 'ssl', 'x509', 'known_certs')
 input_filenames = []
-save_json_stream_version = '0.5.3'
 default_output_directory = './zeeklogs/'
 network_max_read = 1024
 default_max_connections = 778						#Each corelight sensor appears to take a maximum of 12 connections, each Bricata takes 1.  Bash appears to have a max of 1024 without additional ulimit tweaking.
 
 
 if __name__ == '__main__':
-	parser = argparse.ArgumentParser(description='save_json_stream, version ' + str(save_json_stream_version))
+	parser = argparse.ArgumentParser(description='save_json_stream, version ' + str(__version__))
 	parser.add_argument('-f', '--files', help='Input file(s) to process - will process stdin if none', required=False, default=[], nargs='*')
 	parser.add_argument('-p', '--port', help='TCP port to listen on (overrides stdin and and --files options)', required=False, default=None)
 	parser.add_argument('-o', '--outdir', help='Destination directory name (default is ' + str(default_output_directory) + ')', required=False, default=default_output_directory)
@@ -321,7 +335,7 @@ if __name__ == '__main__':
 
 	cert_passphrase = None
 	if user_args['passphrase_file'] and os.path.exists(user_args['passphrase_file']) and os.access(user_args['passphrase_file'], os.R_OK):
-		with open(user_args['passphrase_file']) as certpass_h:
+		with open(user_args['passphrase_file'], encoding="utf8") as certpass_h:
 			cert_passphrase = certpass_h.read().rstrip('\n')
 	elif user_args['passphrase_ask']:
 		cert_passphrase = getpass.getpass(prompt="Please enter the TLS key passhrase (will not show up on the screen): ").rstrip('\n')		#Asks for the password without echoing it to the screen
@@ -329,8 +343,11 @@ if __name__ == '__main__':
 		Debug('Unable to read ' + user_args['passphrase_file'], True)
 
 	mkdir_p(user_args['outdir'])
+	mkdir_p(os.path.join(user_args['outdir'], 'current'))
 	if not os.path.exists(user_args['outdir']) or not os.access(user_args['outdir'], os.W_OK):
 		fail('Unable to create or write to output directory ' + user_args['outdir'])
+	if not os.path.exists(os.path.join(user_args['outdir'], 'current')) or not os.access(os.path.join(user_args['outdir'], 'current'), os.W_OK):
+		fail('Unable to create or write to output directory ' + os.path.join(user_args['outdir'], 'current'))
 
 	for one_file in user_args['files']:
 		if os.path.exists(one_file) and os.access(one_file, os.R_OK):
